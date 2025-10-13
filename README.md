@@ -35,7 +35,7 @@ Built with **FastAPI**, **MongoDB**, and a **Vanilla JS frontend**, LogPuls offe
 ---
 
 ## 🧩 Project Structure
-
+```bash
 LogPuls/
 │
 ├── backend/
@@ -70,18 +70,18 @@ LogPuls/
 ├── docker-compose.yml
 ├── .env
 └── README.md
-
+```
 ---
 
 ## 🔧 Environment Configuration
 
 All runtime settings are stored in `.env`:
-
+```bash
 MONGO_URI=mongodb://mongodb:27017/logpuls
 JWT_SECRET=logpulssecret
 ADMIN_USER=MWasiq
 ADMIN_PASS=1122
-
+```
 
 ---
 
@@ -91,14 +91,17 @@ ADMIN_PASS=1122
 
 ```bash
 docker compose up --build
+```
 2️⃣ Access the App
 
 Once all containers start, open:
 👉 http://localhost:3000
 
 3️⃣ Login Credentials
+```bash
 Username: MWasiq
 Password: 1122
+```
 💻 Agent Setup (Optional)
 
 For live system integration, deploy the agent on a Windows or Linux host.
@@ -144,13 +147,14 @@ Zero Framework Frontend – pure HTML, CSS, and JavaScript
 📦 Example Commands
 
 Rebuild all containers:
-
+```bash
 docker compose up --build --force-recreate
-
+```
 
 Clean up all resources:
-
+```bash
 docker compose down -v
+```
 
 🧾 License
 
