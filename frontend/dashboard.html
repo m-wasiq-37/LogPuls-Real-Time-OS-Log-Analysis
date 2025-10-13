@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LogPuls Dashboard</title>
+<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+<div class="topbar">
+<div class="brand">LogPuls</div>
+<div class="controls">
+<button id="pauseBtn" class="btn">Pause</button>
+<button id="refreshBtn" class="btn muted">Refresh</button>
+<button id="logoutBtn" class="btn red">Logout</button>
+</div>
+</div>
+<main class="container">
+<section class="filterpanel">
+<div class="left">
+<input id="q" placeholder="Search keyword" />
+<select id="level"><option value="">All levels</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select>
+<select id="source"><option value="">All sources</option></select>
+</div>
+<div class="middle">
+<label>From <input id="start" type="datetime-local" /></label>
+<label>To <input id="end" type="datetime-local" /></label>
+</div>
+<div class="right">
+<div class="presets">
+<button class="preset btn">24h</button>
+<button class="preset btn">7d</button>
+<button class="preset btn">30d</button>
+<button class="preset btn">90d</button>
+<button class="preset btn">1y</button>
+</div>
+<label class="autos"><input id="autoscroll" type="checkbox" checked /> Auto-scroll</label>
+<button id="applyBtn" class="btn">Apply</button>
+<button id="resetBtn" class="btn muted">Reset</button>
+</div>
+</section>
+<section class="charts">
+<div class="card"><canvas id="levelChart"></canvas></div>
+<div class="card"><canvas id="sourceChart"></canvas></div>
+<div class="card wide"><canvas id="timeChart"></canvas></div>
+</section>
+<section class="tablewrap">
+<table id="logTable" aria-live="polite">
+<thead>
+<tr><th>Timestamp</th><th>Level</th><th>Source</th><th>Message</th></tr>
+</thead>
+<tbody></tbody>
+</table>
+</section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+function apiHeaders(){
+  const token = localStorage.getItem('lp_token');
+  const h = {'Content-Type':'application/json'};
+  if(token) h['Authorization'] = 'Bearer ' + token;
+  return h;
+}
+async function fetchLogs(params = {}){
+  const qp = new URLSearchParams(params).toString();
+  const res = await fetch('/api/logs?' + qp, {headers: apiHeaders()});
+  if(res.status === 401){
+    localStorage.removeItem('lp_token');
+    location.href = '/login.html';
+    throw new Error('Unauthorized');
+  }
+  if(!res.ok) throw new Error('Failed');
+  return res.json();
+}
+async function fetchStats(params = {}){
+  const qp = new URLSearchParams(params).toString();
+  const res = await fetch('/api/logs/stats?' + qp, {headers: apiHeaders()});
+  if(res.status === 401){
+    localStorage.removeItem('lp_token');
+    location.href = '/login.html';
+    throw new Error('Unauthorized');
+  }
+  if(!res.ok) throw new Error('Failed');
+  return res.json();
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const table = document.querySelector('#logTable tbody');
+  const qInput = document.getElementById('q');
+  const levelSelect = document.getElementById('level');
+  const sourceSelect = document.getElementById('source');
+  const startInput = document.getElementById('start');
+  const endInput = document.getElementById('end');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const autoscroll = document.getElementById('autoscroll');
+  const applyBtn = document.getElementById('applyBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const presets = document.querySelectorAll('.preset');
+  let paused = false;
+  let socket = null;
+  let c1, c2, c3;
+  function rowFor(log){
+    const tr = document.createElement('tr');
+    const t0 = document.createElement('td'); t0.textContent = new Date(log.timestamp).toLocaleString();
+    const t1 = document.createElement('td'); t1.textContent = log.level; t1.className = 'level ' + log.level.toLowerCase();
+    const t2 = document.createElement('td'); t2.textContent = log.source;
+    const t3 = document.createElement('td'); t3.textContent = log.message;
+    tr.append(t0,t1,t2,t3);
+    return tr;
+  }
+  function params(){
+    const p = {};
+    const q = qInput.value.trim(); if(q) p.q = q;
+    const level = levelSelect.value; if(level) p.level = level;
+    const source = sourceSelect.value; if(source) p.source = source;
+    const s = startInput.value; const e = endInput.value;
+    if(s && e){ p.start = new Date(s).toISOString(); p.end = new Date(e).toISOString(); const diff = new Date(e)-new Date(s); const days = diff/(1000*60*60*24); if(days<=1) p.granularity='hour'; else if(days<=30) p.granularity='day'; else p.granularity='month'; } else p.granularity='month';
+    return p;
+  }
+  function applyPreset(label){
+    const now = new Date(); let start = new Date();
+    if(label==='24h') start.setTime(now.getTime() - 24*3600*1000);
+    if(label==='7d') start.setTime(now.getTime() - 7*24*3600*1000);
+    if(label==='30d') start.setTime(now.getTime() - 30*24*3600*1000);
+    if(label==='90d') start.setTime(now.getTime() - 90*24*3600*1000);
+    if(label==='1y') start.setFullYear(now.getFullYear()-1);
+    startInput.value = start.toISOString().slice(0,16);
+    endInput.value = now.toISOString().slice(0,16);
+  }
+  async function loadInitial(){
+    try{
+      const logs = await fetchLogs(Object.assign({limit:500}, params()));
+      table.innerHTML = '';
+      logs.forEach(l => table.appendChild(rowFor(l)));
+      if(autoscroll.checked) table.parentElement.scrollTop = 0;
+    }catch(e){
+      console.error(e);
+    }
+  }
+  async function loadStats(){
+    try{
+      const s = await fetchStats(params());
+      renderLevelChart(s.levels);
+      renderSourceChart(s.sources);
+      renderTimeChart(s.times);
+      populateSources(s.sources);
+    }catch(e){console.error(e);}
+  }
+  function populateSources(sources){
+    const keys = Object.keys(sources||{});
+    sourceSelect.innerHTML = '<option value="">All sources</option>';
+    keys.forEach(k => { const opt = document.createElement('option'); opt.value=k; opt.textContent = `${k} (${sources[k]})`; sourceSelect.appendChild(opt); });
+  }
+  function renderLevelChart(data){
+    const labels = Object.keys(data||{}); const values = labels.map(l=>data[l]);
+    const colors = labels.map(l=> l==='ERROR'?'#fb7185': l==='WARNING'?'#f59e0b':'#60a5fa');
+    const ctx = document.getElementById('levelChart').getContext('2d');
+    if(c1) c1.destroy();
+    c1 = new Chart(ctx, {type:'doughnut', data:{labels, datasets:[{data:values, backgroundColor:colors}]}, options:{plugins:{legend:{position:'bottom'}}}});
+  }
+  function renderSourceChart(data){
+    const labels = Object.keys(data||{}); const values = labels.map(l=>data[l]);
+    const ctx = document.getElementById('sourceChart').getContext('2d');
+    if(c2) c2.destroy();
+    c2 = new Chart(ctx, {type:'bar', data:{labels, datasets:[{data:values}]}, options:{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}});
+  }
+  function renderTimeChart(times){
+    const labels = (times||[]).map(t=> new Date(t.t).toLocaleString());
+    const values = (times||[]).map(t=> t.count);
+    const ctx = document.getElementById('timeChart').getContext('2d');
+    if(c3) c3.destroy();
+    c3 = new Chart(ctx, {type:'line', data:{labels, datasets:[{label:'Events', data:values, fill:true, backgroundColor:'rgba(96,165,250,0.12)', borderColor:'#60a5fa'}]}, options:{scales:{x:{display:true}}}});
+  }
+  function attachSocket(){
+    const token = localStorage.getItem('lp_token'); if(!token) return;
+    if(socket && socket.readyState===WebSocket.OPEN) return;
+    const proto = location.protocol==='https:'?'wss':'ws';
+    const url = proto + '://' + location.host + '/ws/logs?token=' + token;
+    socket = new WebSocket(url);
+    socket.onmessage = (evt) => {
+      if(paused) return;
+      try{
+        const data = JSON.parse(evt.data);
+        const p = params();
+        if(p.level && p.level !== data.level) return;
+        if(p.source && p.source !== data.source) return;
+        if(p.q && !data.message.toLowerCase().includes(p.q.toLowerCase())) return;
+        table.insertBefore(rowFor(data), table.firstChild);
+        if(autoscroll.checked) table.parentElement.scrollTop = 0;
+        loadStats();
+      }catch(e){console.error(e);}
+    };
+    socket.onclose = () => setTimeout(attachSocket, 2000);
+  }
+  pauseBtn.addEventListener('click', ()=>{ paused = !paused; pauseBtn.textContent = paused ? 'Resume' : 'Pause'; });
+  refreshBtn.addEventListener('click', ()=>{ loadInitial(); loadStats(); });
+  applyBtn.addEventListener('click', ()=>{ loadInitial(); loadStats(); });
+  resetBtn.addEventListener('click', ()=>{ qInput.value=''; levelSelect.value=''; sourceSelect.value=''; startInput.value=''; endInput.value=''; loadInitial(); loadStats(); });
+  presets.forEach(p => p.addEventListener('click', e => applyPreset(e.target.textContent)));
+  logoutBtn.addEventListener('click', ()=>{ localStorage.removeItem('lp_token'); if(socket) socket.close(); location.href='/login.html'; });
+  const token = localStorage.getItem('lp_token');
+  if(!token){ location.href = '/login.html'; return; }
+  const now = new Date(); endInput.value = now.toISOString().slice(0,16); const past = new Date(); past.setDate(now.getDate()-30); startInput.value = past.toISOString().slice(0,16);
+  loadInitial(); loadStats(); attachSocket();
+});
+</script>
+</body>
+</html>

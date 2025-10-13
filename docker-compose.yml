@@ -1,0 +1,27 @@
+services:
+  mongodb:
+    image: mongo:6
+    restart: always
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+  backend:
+    build: ./backend
+    restart: on-failure
+    environment:
+      - MONGO_URI=${MONGO_URI}
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_USER=${ADMIN_USER}
+      - ADMIN_PASS=${ADMIN_PASS}
+    depends_on:
+      - mongodb
+  proxy:
+    build: ./frontend
+    restart: on-failure
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+volumes:
+  mongo_data:
