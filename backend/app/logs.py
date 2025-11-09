@@ -1,10 +1,31 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import Body
 from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, validator, constr
 from . import db as dbmod
 from .auth import JWT_SECRET, ALGORITHM
 from jose import jwt, JWTError
 from .websocket import manager
+from .main import limiter
+from loguru import logger
+
+class LogEntry(BaseModel):
+    timestamp: Optional[str] = None
+    level: constr(regex='^(INFO|WARNING|ERROR)$')
+    source: constr(min_length=1, max_length=50)
+    message: constr(min_length=1, max_length=1000)
+
+    @validator('timestamp', pre=True, always=True)
+    def set_timestamp(cls, v):
+        if v is None:
+            return datetime.utcnow().isoformat()
+        try:
+            datetime.fromisoformat(v)
+            return v
+        except (TypeError, ValueError):
+            raise ValueError('Invalid timestamp format. Use ISO format.')
+
 router = APIRouter()
 async def get_current_user(request: Request):
     auth = request.headers.get("authorization")
@@ -17,23 +38,32 @@ async def get_current_user(request: Request):
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 @router.post("/logs/ingest")
-async def ingest_log(payload: dict = Body(...), user: str = Depends(get_current_user)):
-    if dbmod.db is None:
-        raise HTTPException(status_code=503, detail="database not ready")
-    data = {
-        "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
-        "level": payload.get("level", "INFO"),
-        "source": payload.get("source", "agent"),
-        "message": payload.get("message", "")
-    }
-    result = await dbmod.db.logs.insert_one(data)
-    doc = await dbmod.db.logs.find_one({"_id": result.inserted_id})
-    doc["_id"] = str(doc["_id"])
+@limiter.limit("100/minute")
+async def ingest_log(request: Request, log_entry: LogEntry, user: str = Depends(get_current_user)):
     try:
-        await manager.broadcast(doc)
-    except:
-        pass
-    return {"status": "ok", "id": str(result.inserted_id)}
+        if dbmod.db is None:
+            raise HTTPException(status_code=503, detail="Database not ready")
+        
+        data = log_entry.dict()
+        result = await dbmod.db.logs.insert_one(data)
+        
+        doc = await dbmod.db.logs.find_one({"_id": result.inserted_id})
+        if not doc:
+            raise HTTPException(status_code=500, detail="Failed to verify log insertion")
+            
+        doc["_id"] = str(doc["_id"])
+        
+        try:
+            await manager.broadcast(doc)
+        except Exception as e:
+            logger.warning(f"Failed to broadcast log: {e}")
+            
+        logger.info(f"Log ingested: {data['level']} from {data['source']}")
+        return {"status": "ok", "id": str(result.inserted_id)}
+        
+    except Exception as e:
+        logger.error(f"Error ingesting log: {e}")
+        raise HTTPException(status_code=500, detail="Failed to ingest log entry")
 @router.get("/logs")
 async def list_logs(level: str = None, q: str = None, source: str = None, start: str = None, end: str = None, limit: int = 200, skip: int = 0, user: str = Depends(get_current_user)):
     if dbmod.db is None:
