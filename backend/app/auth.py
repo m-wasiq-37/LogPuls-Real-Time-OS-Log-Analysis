@@ -14,7 +14,7 @@ class LoginIn(BaseModel):
     username: str
     password: str
 @router.post("/auth/login")
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def login(request: Request, payload: LoginIn):
     try:
         if dbmod.db is None:
