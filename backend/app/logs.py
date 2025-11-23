@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import Body
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, validator, constr
 from . import db as dbmod
 from .auth import JWT_SECRET, ALGORITHM
@@ -10,10 +10,11 @@ from .websocket import manager
 from .main import limiter
 from loguru import logger
 
+
 class LogEntry(BaseModel):
     timestamp: Optional[str] = None
-    level: constr(regex='^(INFO|WARNING|ERROR)$')
-    source: constr(min_length=1, max_length=50)
+    level: constr(regex='^(INFO|WARNING|ERROR)$') = 'INFO'
+    source: constr(min_length=1, max_length=100) = 'agent'
     message: constr(min_length=1, max_length=1000)
 
     @validator('timestamp', pre=True, always=True)
@@ -25,6 +26,15 @@ class LogEntry(BaseModel):
             return v
         except (TypeError, ValueError):
             raise ValueError('Invalid timestamp format. Use ISO format.')
+
+
+class BatchPayload(BaseModel):
+    lines: List[constr(min_length=1, max_length=1000)]
+    source: Optional[str] = 'agent'
+    agent: Optional[str]
+    truncated: Optional[bool] = False
+    timestamp: Optional[str] = None
+
 
 router = APIRouter()
 async def get_current_user(request: Request):
@@ -39,28 +49,66 @@ async def get_current_user(request: Request):
         raise HTTPException(status_code=401, detail="Invalid token")
 @router.post("/logs/ingest")
 @limiter.limit("100/minute")
-async def ingest_log(request: Request, log_entry: LogEntry, user: str = Depends(get_current_user)):
+async def ingest_log(request: Request, payload: dict = Body(...), user: str = Depends(get_current_user)):
+    """Accept either a single log entry or a batch payload with `lines`.
+    If `lines` present, we expand into separate documents and insert_many for efficiency.
+    """
+    if dbmod.db is None:
+        raise HTTPException(status_code=503, detail="Database not ready")
+
     try:
-        if dbmod.db is None:
-            raise HTTPException(status_code=503, detail="Database not ready")
-        
-        data = log_entry.dict()
+        # Batch payload
+        if isinstance(payload, dict) and 'lines' in payload and isinstance(payload.get('lines'), list):
+            batch = BatchPayload(**payload)
+            now = batch.timestamp or datetime.utcnow().isoformat()
+            docs = []
+            for ln in batch.lines:
+                docs.append({
+                    'timestamp': now,
+                    'level': 'INFO',
+                    'source': batch.source or 'agent',
+                    'message': ln,
+                    'agent': batch.agent,
+                    'file': batch.source,
+                    'truncated': bool(batch.truncated)
+                })
+
+            if not docs:
+                raise HTTPException(status_code=400, detail='No lines to ingest')
+
+            result = await dbmod.db.logs.insert_many(docs)
+
+            # Retrieve inserted docs (optional) and broadcast
+            # We will broadcast each inserted doc to connected clients
+            inserted_ids = result.inserted_ids
+            for _id in inserted_ids:
+                doc = await dbmod.db.logs.find_one({'_id': _id})
+                if doc:
+                    doc['_id'] = str(doc['_id'])
+                    try:
+                        await manager.broadcast(doc)
+                    except Exception as e:
+                        logger.debug(f'Broadcast failed for batch doc: {e}')
+
+            logger.info(f"Batch ingested: {len(docs)} lines from {batch.agent or 'unknown'}")
+            return {"status": "ok", "inserted": len(docs)}
+
+        # Single entry payload: try to validate as LogEntry
+        entry = LogEntry(**payload)
+        data = entry.dict()
         result = await dbmod.db.logs.insert_one(data)
-        
         doc = await dbmod.db.logs.find_one({"_id": result.inserted_id})
-        if not doc:
-            raise HTTPException(status_code=500, detail="Failed to verify log insertion")
-            
         doc["_id"] = str(doc["_id"])
-        
         try:
             await manager.broadcast(doc)
         except Exception as e:
             logger.warning(f"Failed to broadcast log: {e}")
-            
+
         logger.info(f"Log ingested: {data['level']} from {data['source']}")
         return {"status": "ok", "id": str(result.inserted_id)}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error ingesting log: {e}")
         raise HTTPException(status_code=500, detail="Failed to ingest log entry")
