@@ -1,41 +1,61 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import WebSocket, WebSocketDisconnect
 from typing import List
-from jose import jwt
-from .auth import JWT_SECRET, ALGORITHM
-router = APIRouter()
+import json
+import asyncio
+from backend.app.db import db
+from backend.app.logs import analyzer
+
 class ConnectionManager:
     def __init__(self):
-        self.active: List[WebSocket] = []
-    async def connect(self, websocket: WebSocket, token: str = None):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        if token:
-            try:
-                jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-            except:
-                await websocket.close()
-                return
-        else:
-            await websocket.close()
-            return
-        self.active.append(websocket)
+        self.active_connections.append(websocket)
+    
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active:
-            self.active.remove(websocket)
-    async def broadcast(self, message: dict):
-        to_remove = []
-        for ws in list(self.active):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+    
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        try:
+            await websocket.send_text(message)
+        except:
+            self.disconnect(websocket)
+    
+    async def broadcast(self, message: str):
+        disconnected = []
+        for connection in self.active_connections:
             try:
-                await ws.send_json(message)
+                await connection.send_text(message)
             except:
-                to_remove.append(ws)
-        for ws in to_remove:
-            self.disconnect(ws)
+                disconnected.append(connection)
+        
+        for conn in disconnected:
+            self.disconnect(conn)
+
+
 manager = ConnectionManager()
-@router.websocket("/ws/logs")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
-    await manager.connect(websocket, token)
+
+
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            
+            logs = db.get_logs(size=100)
+            stats = db.get_log_statistics()
+            analysis = analyzer.analyze_logs(logs)
+            
+            data = {
+                "type": "update",
+                "stats": stats,
+                "analysis": analysis,
+                "log_count": len(logs)
+            }
+            
+            await websocket.send_text(json.dumps(data))
+            await asyncio.sleep(5)  
+            
     except WebSocketDisconnect:
         manager.disconnect(websocket)

@@ -1,63 +1,80 @@
 services:
   mongodb:
-    image: mongo:6
-    restart: always
-    volumes:
-      - mongo_data:/data/db
+    image: mongo:6.0
+    container_name: mongodb
+    environment:
+      - MONGO_INITDB_DATABASE=logpuls
     ports:
       - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - logpuls-network
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  log-collector:
+    build: .
+    container_name: log-collector
+    command: python /app/agent/log_collector.py
+    environment:
+      - LOG_COLLECTOR_PORT=5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./agent:/app/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - logpuls-network
 
   backend:
-    build: ./backend
-    restart: on-failure
+    build: .
+    container_name: backend
+    ports:
+      - "8000:8000"
     environment:
-      - MONGO_URI=${MONGO_URI}
-      - JWT_SECRET=${JWT_SECRET}
-      - ADMIN_USER=${ADMIN_USER}
-      - ADMIN_PASS=${ADMIN_PASS}
+      - MONGODB_HOST=mongodb
+      - MONGODB_PORT=27017
+      - MONGODB_DATABASE=logpuls
+      - LOG_COLLECTOR_HOST=log-collector
+      - LOG_COLLECTOR_PORT=5000
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD}
     depends_on:
       mongodb:
         condition: service_healthy
+      log-collector:
+        condition: service_started
+    volumes:
+      - ./backend:/app/backend
+      - ./agent:/app/agent
+    networks:
+      - logpuls-network
+    command: /app/docker-entrypoint.sh uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  proxy:
-    build: ./frontend
-    restart: on-failure
+  frontend:
+    image: nginx:alpine
+    container_name: frontend
     ports:
-      - "3000:80"
+      - "1234:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html
+    networks:
+      - logpuls-network
     depends_on:
       backend:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: '0.3'
-          memory: 128M
+
+networks:
+  logpuls-network:
+    driver: bridge
 
 volumes:
-  mongo_data:
-    driver: local
+  mongodb_data:

@@ -1,210 +1,502 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LogPuls Dashboard</title>
-<link rel="stylesheet" href="/css/style.css">
-<link rel="stylesheet" href="/css/dashboard.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - LogPuls</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
 </head>
 <body>
-<div class="topbar">
-<div class="brand">LogPuls</div>
-<div class="controls">
-<button id="pauseBtn" class="btn">Pause</button>
-<button id="refreshBtn" class="btn muted">Refresh</button>
-<button id="logoutBtn" class="btn red">Logout</button>
-</div>
-</div>
-<main class="container">
-<section class="filterpanel">
-<div class="left">
-<input id="q" placeholder="Search keyword" />
-<select id="level"><option value="">All levels</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select>
-<select id="source"><option value="">All sources</option></select>
-</div>
-<div class="middle">
-<label>From <input id="start" type="datetime-local" /></label>
-<label>To <input id="end" type="datetime-local" /></label>
-</div>
-<div class="right">
-<div class="presets">
-<button class="preset btn">24h</button>
-<button class="preset btn">7d</button>
-<button class="preset btn">30d</button>
-<button class="preset btn">90d</button>
-<button class="preset btn">1y</button>
-</div>
-<label class="autos"><input id="autoscroll" type="checkbox" checked /> Auto-scroll</label>
-<button id="applyBtn" class="btn">Apply</button>
-<button id="resetBtn" class="btn muted">Reset</button>
-</div>
-</section>
-<section class="charts">
-<div class="card"><canvas id="levelChart"></canvas></div>
-<div class="card"><canvas id="sourceChart"></canvas></div>
-<div class="card wide"><canvas id="timeChart"></canvas></div>
-</section>
-<section class="tablewrap">
-<table id="logTable" aria-live="polite">
-<thead>
-<tr><th>Timestamp</th><th>Level</th><th>Source</th><th>Message</th></tr>
-</thead>
-<tbody></tbody>
-</table>
-</section>
-</main>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>
-function apiHeaders(){
-  const token = localStorage.getItem('lp_token');
-  const h = {'Content-Type':'application/json'};
-  if(token) h['Authorization'] = 'Bearer ' + token;
-  return h;
-}
-async function fetchLogs(params = {}){
-  const qp = new URLSearchParams(params).toString();
-  const res = await fetch('/api/logs?' + qp, {headers: apiHeaders()});
-  if(res.status === 401){
-    localStorage.removeItem('lp_token');
-    location.href = '/login.html';
-    throw new Error('Unauthorized');
-  }
-  if(!res.ok) throw new Error('Failed');
-  return res.json();
-}
-async function fetchStats(params = {}){
-  const qp = new URLSearchParams(params).toString();
-  const res = await fetch('/api/logs/stats?' + qp, {headers: apiHeaders()});
-  if(res.status === 401){
-    localStorage.removeItem('lp_token');
-    location.href = '/login.html';
-    throw new Error('Unauthorized');
-  }
-  if(!res.ok) throw new Error('Failed');
-  return res.json();
-}
-document.addEventListener('DOMContentLoaded', () => {
-  const table = document.querySelector('#logTable tbody');
-  const qInput = document.getElementById('q');
-  const levelSelect = document.getElementById('level');
-  const sourceSelect = document.getElementById('source');
-  const startInput = document.getElementById('start');
-  const endInput = document.getElementById('end');
-  const pauseBtn = document.getElementById('pauseBtn');
-  const refreshBtn = document.getElementById('refreshBtn');
-  const logoutBtn = document.getElementById('logoutBtn');
-  const autoscroll = document.getElementById('autoscroll');
-  const applyBtn = document.getElementById('applyBtn');
-  const resetBtn = document.getElementById('resetBtn');
-  const presets = document.querySelectorAll('.preset');
-  let paused = false;
-  let socket = null;
-  let c1, c2, c3;
-  function rowFor(log){
-    const tr = document.createElement('tr');
-    const t0 = document.createElement('td'); t0.textContent = new Date(log.timestamp).toLocaleString();
-    const t1 = document.createElement('td'); t1.textContent = log.level; t1.className = 'level ' + log.level.toLowerCase();
-    const t2 = document.createElement('td'); t2.textContent = log.source;
-    const t3 = document.createElement('td'); t3.textContent = log.message;
-    tr.append(t0,t1,t2,t3);
-    return tr;
-  }
-  function params(){
-    const p = {};
-    const q = qInput.value.trim(); if(q) p.q = q;
-    const level = levelSelect.value; if(level) p.level = level;
-    const source = sourceSelect.value; if(source) p.source = source;
-    const s = startInput.value; const e = endInput.value;
-    if(s && e){ p.start = new Date(s).toISOString(); p.end = new Date(e).toISOString(); const diff = new Date(e)-new Date(s); const days = diff/(1000*60*60*24); if(days<=1) p.granularity='hour'; else if(days<=30) p.granularity='day'; else p.granularity='month'; } else p.granularity='month';
-    return p;
-  }
-  function applyPreset(label){
-    const now = new Date(); let start = new Date();
-    if(label==='24h') start.setTime(now.getTime() - 24*3600*1000);
-    if(label==='7d') start.setTime(now.getTime() - 7*24*3600*1000);
-    if(label==='30d') start.setTime(now.getTime() - 30*24*3600*1000);
-    if(label==='90d') start.setTime(now.getTime() - 90*24*3600*1000);
-    if(label==='1y') start.setFullYear(now.getFullYear()-1);
-    startInput.value = start.toISOString().slice(0,16);
-    endInput.value = now.toISOString().slice(0,16);
-  }
-  async function loadInitial(){
-    try{
-      const logs = await fetchLogs(Object.assign({limit:500}, params()));
-      table.innerHTML = '';
-      logs.forEach(l => table.appendChild(rowFor(l)));
-      if(autoscroll.checked) table.parentElement.scrollTop = 0;
-    }catch(e){
-      console.error(e);
-    }
-  }
-  async function loadStats(){
-    try{
-      const s = await fetchStats(params());
-      renderLevelChart(s.levels);
-      renderSourceChart(s.sources);
-      renderTimeChart(s.times);
-      populateSources(s.sources);
-    }catch(e){console.error(e);}
-  }
-  function populateSources(sources){
-    const keys = Object.keys(sources||{});
-    sourceSelect.innerHTML = '<option value="">All sources</option>';
-    keys.forEach(k => { const opt = document.createElement('option'); opt.value=k; opt.textContent = `${k} (${sources[k]})`; sourceSelect.appendChild(opt); });
-  }
-  function renderLevelChart(data){
-    const labels = Object.keys(data||{}); const values = labels.map(l=>data[l]);
-    const colors = labels.map(l=> l==='ERROR'?'#fb7185': l==='WARNING'?'#f59e0b':'#60a5fa');
-    const ctx = document.getElementById('levelChart').getContext('2d');
-    if(c1) c1.destroy();
-    c1 = new Chart(ctx, {type:'doughnut', data:{labels, datasets:[{data:values, backgroundColor:colors}]}, options:{plugins:{legend:{position:'bottom'}}}});
-  }
-  function renderSourceChart(data){
-    const labels = Object.keys(data||{}); const values = labels.map(l=>data[l]);
-    const ctx = document.getElementById('sourceChart').getContext('2d');
-    if(c2) c2.destroy();
-    c2 = new Chart(ctx, {type:'bar', data:{labels, datasets:[{data:values}]}, options:{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true}}}});
-  }
-  function renderTimeChart(times){
-    const labels = (times||[]).map(t=> new Date(t.t).toLocaleString());
-    const values = (times||[]).map(t=> t.count);
-    const ctx = document.getElementById('timeChart').getContext('2d');
-    if(c3) c3.destroy();
-    c3 = new Chart(ctx, {type:'line', data:{labels, datasets:[{label:'Events', data:values, fill:true, backgroundColor:'rgba(96,165,250,0.12)', borderColor:'#60a5fa'}]}, options:{scales:{x:{display:true}}}});
-  }
-  function attachSocket(){
-    const token = localStorage.getItem('lp_token'); if(!token) return;
-    if(socket && socket.readyState===WebSocket.OPEN) return;
-    const proto = location.protocol==='https:'?'wss':'ws';
-    const url = proto + '://' + location.host + '/ws/logs?token=' + token;
-    socket = new WebSocket(url);
-    socket.onmessage = (evt) => {
-      if(paused) return;
-      try{
-        const data = JSON.parse(evt.data);
-        const p = params();
-        if(p.level && p.level !== data.level) return;
-        if(p.source && p.source !== data.source) return;
-        if(p.q && !data.message.toLowerCase().includes(p.q.toLowerCase())) return;
-        table.insertBefore(rowFor(data), table.firstChild);
-        if(autoscroll.checked) table.parentElement.scrollTop = 0;
+
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <h2>LogPuls</h2>
+            </div>
+            <div class="nav-actions">
+                <button class="btn btn-secondary" onclick="refreshLogs()">🔄 Refresh Logs</button>
+                <button class="btn btn-danger" onclick="logout()">Logout</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="dashboard-container">
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Logs</h3>
+                <p id="totalLogs">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Errors</h3>
+                <p id="errorCount" class="error-text">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Warnings</h3>
+                <p id="warningCount" class="warning-text">0</p>
+            </div>
+            <div class="stat-card">
+                <h3>Information</h3>
+                <p id="infoCount" class="info-text">0</p>
+            </div>
+        </div>
+
+        <div class="warnings-section" id="warningsSection" style="display: none;">
+            <h3>⚠️ System Warnings</h3>
+            <div id="warningsContainer"></div>
+        </div>
+
+        <div class="filters-section">
+            <h3>Filters</h3>
+            <div class="filters-grid">
+                <div class="filter-group">
+                    <label for="filterLogName">Log Name</label>
+                    <select id="filterLogName">
+                        <option value="">All</option>
+                        <option value="System">System</option>
+                        <option value="Application">Application</option>
+                        <option value="Security">Security</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="filterLevel">Level</label>
+                    <select id="filterLevel">
+                        <option value="">All</option>
+                        <option value="Error">Error</option>
+                        <option value="Warning">Warning</option>
+                        <option value="Information">Information</option>
+                        <option value="Critical">Critical</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="filterProvider">Provider</label>
+                    <input type="text" id="filterProvider" placeholder="Search provider...">
+                </div>
+                <div class="filter-group">
+                    <label for="filterMessage">Message</label>
+                    <input type="text" id="filterMessage" placeholder="Search message...">
+                </div>
+                <div class="filter-group">
+                    <label for="filterStartDate">Start Date</label>
+                    <input type="datetime-local" id="filterStartDate">
+                </div>
+                <div class="filter-group">
+                    <label for="filterEndDate">End Date</label>
+                    <input type="datetime-local" id="filterEndDate">
+                </div>
+                <div class="filter-group">
+                    <label for="filterEventId">Event ID</label>
+                    <input type="number" id="filterEventId" placeholder="Event ID">
+                </div>
+                <div class="filter-actions">
+                    <button class="btn btn-primary" onclick="applyFilters()">Apply Filters</button>
+                    <button class="btn btn-secondary" onclick="clearFilters()">Clear</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="charts-section">
+            <div class="chart-container">
+                <h3>Logs by Level</h3>
+                <canvas id="levelChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Logs by Type</h3>
+                <canvas id="typeChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Logs Over Time</h3>
+                <canvas id="timeChart"></canvas>
+            </div>
+        </div>
+
+        <div class="table-section">
+            <div class="table-header">
+                <h3>Log Entries</h3>
+                <div class="table-actions">
+                    <input type="text" id="tableSearch" placeholder="Search logs..." onkeyup="searchTable()">
+                    <select id="tablePageSize" onchange="loadLogs()">
+                        <option value="50">50 per page</option>
+                        <option value="100" selected>100 per page</option>
+                        <option value="200">200 per page</option>
+                        <option value="500">500 per page</option>
+                    </select>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="logsTable">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Level</th>
+                            <th>Log Name</th>
+                            <th>Event ID</th>
+                            <th>Provider</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logsTableBody">
+                        <tr>
+                            <td colspan="6" class="loading">Loading logs...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination">
+                <button class="btn btn-secondary" onclick="previousPage()" id="prevBtn">Previous</button>
+                <span id="pageInfo">Page 1</span>
+                <button class="btn btn-secondary" onclick="nextPage()" id="nextBtn">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/api';
+        let currentPage = 1;
+        let pageSize = 100;
+        let allLogs = [];
+        let filteredLogs = [];
+        let charts = {};
+
+        if (sessionStorage.getItem('authenticated') !== 'true') {
+            window.location.href = 'index.html';
+        }
+
+        function initCharts() {
+            const levelCtx = document.getElementById('levelChart').getContext('2d');
+            charts.level = new Chart(levelCtx, {
+                type: 'pie',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: ['#e74c3c', '#f39c12', '#3498db', '#2ecc71', '#9b59b6']
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true
+                }
+            });
+
+            const typeCtx = document.getElementById('typeChart').getContext('2d');
+            charts.type = new Chart(typeCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Log Count',
+                        data: [],
+                        backgroundColor: '#3498db'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+
+            const timeCtx = document.getElementById('timeChart').getContext('2d');
+            charts.time = new Chart(timeCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Logs',
+                        data: [],
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_BASE}/stats`);
+                const data = await response.json();
+
+                if (data.success) {
+                    const stats = data.stats;
+                    document.getElementById('totalLogs').textContent = stats.total_logs || 0;
+
+                    const byLevel = stats.by_level || {};
+                    document.getElementById('errorCount').textContent = (byLevel.Error || 0) + (byLevel.Critical || 0);
+                    document.getElementById('warningCount').textContent = byLevel.Warning || 0;
+                    document.getElementById('infoCount').textContent = byLevel.Information || 0;
+
+                    updateCharts(stats);
+                }
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        function updateCharts(stats) {
+            const byLevel = stats.by_level || {};
+            const byLogName = stats.by_log_name || {};
+
+            charts.level.data.labels = Object.keys(byLevel);
+            charts.level.data.datasets[0].data = Object.values(byLevel);
+            charts.level.update();
+
+            charts.type.data.labels = Object.keys(byLogName);
+            charts.type.data.datasets[0].data = Object.values(byLogName);
+            charts.type.update();
+
+            updateTimeChart();
+        }
+
+        function updateTimeChart() {
+            if (allLogs.length === 0) return;
+
+            const timeGroups = {};
+            allLogs.forEach(log => {
+                if (log.timestamp) {
+                    const date = new Date(log.timestamp);
+                    const hour = date.toISOString().slice(0, 13) + ':00';
+                    timeGroups[hour] = (timeGroups[hour] || 0) + 1;
+                }
+            });
+
+            const labels = Object.keys(timeGroups).sort().slice(-24); 
+
+            const data = labels.map(label => timeGroups[label] || 0);
+
+            charts.time.data.labels = labels;
+            charts.time.data.datasets[0].data = data;
+            charts.time.update();
+        }
+
+        async function loadLogs() {
+            try {
+                pageSize = parseInt(document.getElementById('tablePageSize').value);
+
+                const filters = getFilters();
+                const queryParams = new URLSearchParams();
+
+                Object.keys(filters).forEach(key => {
+                    if (filters[key]) {
+                        queryParams.append(key, filters[key]);
+                    }
+                });
+                queryParams.append('size', pageSize);
+
+                const response = await fetch(`${API_BASE}/logs?${queryParams}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    allLogs = data.logs || [];
+                    filteredLogs = allLogs;
+                    displayLogs();
+                }
+            } catch (error) {
+                console.error('Error loading logs:', error);
+                document.getElementById('logsTableBody').innerHTML = 
+                    '<tr><td colspan="6" class="error">Error loading logs</td></tr>';
+            }
+        }
+
+        function getFilters() {
+            return {
+                log_name: document.getElementById('filterLogName').value,
+                level: document.getElementById('filterLevel').value,
+                provider: document.getElementById('filterProvider').value,
+                message: document.getElementById('filterMessage').value,
+                start_date: document.getElementById('filterStartDate').value ? 
+                    new Date(document.getElementById('filterStartDate').value).toISOString() : null,
+                end_date: document.getElementById('filterEndDate').value ? 
+                    new Date(document.getElementById('filterEndDate').value).toISOString() : null,
+                event_id: document.getElementById('filterEventId').value || null
+            };
+        }
+
+        async function applyFilters() {
+            currentPage = 1;
+            await loadLogs();
+        }
+
+        function clearFilters() {
+            document.getElementById('filterLogName').value = '';
+            document.getElementById('filterLevel').value = '';
+            document.getElementById('filterProvider').value = '';
+            document.getElementById('filterMessage').value = '';
+            document.getElementById('filterStartDate').value = '';
+            document.getElementById('filterEndDate').value = '';
+            document.getElementById('filterEventId').value = '';
+            currentPage = 1;
+            loadLogs();
+        }
+
+        function displayLogs() {
+            const tbody = document.getElementById('logsTableBody');
+            const start = (currentPage - 1) * pageSize;
+            const end = start + pageSize;
+            const pageLogs = filteredLogs.slice(start, end);
+
+            if (pageLogs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No logs found</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = pageLogs.map(log => {
+                const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A';
+                const level = log.level || 'Unknown';
+                const levelClass = level.toLowerCase().replace(' ', '-');
+                const message = (log.message || '').substring(0, 100) + (log.message && log.message.length > 100 ? '...' : '');
+
+                return `
+                    <tr>
+                        <td>${timestamp}</td>
+                        <td><span class="badge badge-${levelClass}">${level}</span></td>
+                        <td>${log.log_name || 'N/A'}</td>
+                        <td>${log.event_id || 'N/A'}</td>
+                        <td>${log.provider || 'N/A'}</td>
+                        <td class="message-cell" title="${log.message || ''}">${message}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            const totalPages = Math.ceil(filteredLogs.length / pageSize);
+            document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages || 1}`;
+            document.getElementById('prevBtn').disabled = currentPage === 1;
+            document.getElementById('nextBtn').disabled = currentPage >= totalPages;
+        }
+
+        function searchTable() {
+            const searchTerm = document.getElementById('tableSearch').value.toLowerCase();
+            if (!searchTerm) {
+                filteredLogs = allLogs;
+            } else {
+                filteredLogs = allLogs.filter(log => {
+                    return (
+                        (log.message || '').toLowerCase().includes(searchTerm) ||
+                        (log.provider || '').toLowerCase().includes(searchTerm) ||
+                        (log.log_name || '').toLowerCase().includes(searchTerm) ||
+                        (log.level || '').toLowerCase().includes(searchTerm) ||
+                        String(log.event_id || '').includes(searchTerm)
+                    );
+                });
+            }
+            currentPage = 1;
+            displayLogs();
+        }
+
+        function nextPage() {
+            const totalPages = Math.ceil(filteredLogs.length / pageSize);
+            if (currentPage < totalPages) {
+                currentPage++;
+                displayLogs();
+            }
+        }
+
+        function previousPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                displayLogs();
+            }
+        }
+
+        async function refreshLogs() {
+            try {
+                const btn = event.target;
+                btn.disabled = true;
+                btn.textContent = 'Collecting...';
+
+                const response = await fetch(`${API_BASE}/logs/collect?log_type=All&hours=24&max_events=1000`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    await loadLogs();
+                    await loadStats();
+                    await loadAnalysis();
+                    alert(`Successfully collected ${data.count} logs!`);
+                } else {
+                    alert('Failed to collect logs: ' + (data.detail || data.message || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error refreshing logs:', error);
+                let errorMsg = 'Error collecting logs';
+                try {
+                    const errorResponse = await error.response?.json();
+                    if (errorResponse?.detail) {
+                        errorMsg = errorResponse.detail;
+                    }
+                } catch (e) {
+
+                }
+                alert(errorMsg + '\n\nMake sure PowerShell helper server is running:\n.\\agent\\powershell_server.ps1');
+            } finally {
+                const btn = event.target;
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh Logs';
+            }
+        }
+
+        async function loadAnalysis() {
+            try {
+                const response = await fetch(`${API_BASE}/analysis?hours=24`);
+                const data = await response.json();
+
+                if (data.success && data.analysis) {
+                    const analysis = data.analysis;
+                    const warnings = analysis.warnings || [];
+
+                    if (warnings.length > 0) {
+                        document.getElementById('warningsSection').style.display = 'block';
+                        const container = document.getElementById('warningsContainer');
+                        container.innerHTML = warnings.map(warning => {
+                            const severityClass = warning.severity || 'medium';
+                            return `
+                                <div class="warning-item warning-${severityClass}">
+                                    <strong>${warning.type}</strong>
+                                    <p>${warning.message}</p>
+                                </div>
+                            `;
+                        }).join('');
+                    } else {
+                        document.getElementById('warningsSection').style.display = 'none';
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading analysis:', error);
+            }
+        }
+
+        function logout() {
+            sessionStorage.removeItem('authenticated');
+            window.location.href = 'index.html';
+        }
+
+        initCharts();
+        loadLogs();
         loadStats();
-      }catch(e){console.error(e);}
-    };
-    socket.onclose = () => setTimeout(attachSocket, 2000);
-  }
-  pauseBtn.addEventListener('click', ()=>{ paused = !paused; pauseBtn.textContent = paused ? 'Resume' : 'Pause'; });
-  refreshBtn.addEventListener('click', ()=>{ loadInitial(); loadStats(); });
-  applyBtn.addEventListener('click', ()=>{ loadInitial(); loadStats(); });
-  resetBtn.addEventListener('click', ()=>{ qInput.value=''; levelSelect.value=''; sourceSelect.value=''; startInput.value=''; endInput.value=''; loadInitial(); loadStats(); });
-  presets.forEach(p => p.addEventListener('click', e => applyPreset(e.target.textContent)));
-  logoutBtn.addEventListener('click', ()=>{ localStorage.removeItem('lp_token'); if(socket) socket.close(); location.href='/login.html'; });
-  const token = localStorage.getItem('lp_token');
-  if(!token){ location.href = '/login.html'; return; }
-  const now = new Date(); endInput.value = now.toISOString().slice(0,16); const past = new Date(); past.setDate(now.getDate()-30); startInput.value = past.toISOString().slice(0,16);
-  loadInitial(); loadStats(); attachSocket();
-});
-</script>
+        loadAnalysis();
+
+        setInterval(() => {
+            loadStats();
+            loadAnalysis();
+        }, 30000);
+    </script>
 </body>
 </html>
+

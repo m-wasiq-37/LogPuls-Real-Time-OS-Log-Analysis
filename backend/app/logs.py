@@ -1,174 +1,161 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi import Body
-from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel, validator, constr
-from . import db as dbmod
-from .auth import JWT_SECRET, ALGORITHM
-from jose import jwt, JWTError
-from .websocket import manager
-from .main import limiter
-from loguru import logger
+import sys
+import os
+from pathlib import Path
 
 
-class LogEntry(BaseModel):
-    timestamp: Optional[str] = None
-    level: constr(regex='^(INFO|WARNING|ERROR)$') = 'INFO'
-    source: constr(min_length=1, max_length=100) = 'agent'
-    message: constr(min_length=1, max_length=1000)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-    @validator('timestamp', pre=True, always=True)
-    def set_timestamp(cls, v):
-        if v is None:
-            return datetime.utcnow().isoformat()
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except (TypeError, ValueError):
-            raise ValueError('Invalid timestamp format. Use ISO format.')
+from agent.agent import get_logs_filtered
+from backend.app.db import db
+from typing import List, Dict, Any
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import DBSCAN
+from collections import Counter
+import re
 
 
-class BatchPayload(BaseModel):
-    lines: List[constr(min_length=1, max_length=1000)]
-    source: Optional[str] = 'agent'
-    agent: Optional[str]
-    truncated: Optional[bool] = False
-    timestamp: Optional[str] = None
-
-
-router = APIRouter()
-async def get_current_user(request: Request):
-    auth = request.headers.get("authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    token = auth.split(" ", 1)[1]
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        return payload.get("sub")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-@router.post("/logs/ingest")
-@limiter.limit("100/minute")
-async def ingest_log(request: Request, payload: dict = Body(...), user: str = Depends(get_current_user)):
-    """Accept either a single log entry or a batch payload with `lines`.
-    If `lines` present, we expand into separate documents and insert_many for efficiency.
-    """
-    if dbmod.db is None:
-        raise HTTPException(status_code=503, detail="Database not ready")
-
-    try:
-        # Batch payload
-        if isinstance(payload, dict) and 'lines' in payload and isinstance(payload.get('lines'), list):
-            batch = BatchPayload(**payload)
-            now = batch.timestamp or datetime.utcnow().isoformat()
-            docs = []
-            for ln in batch.lines:
-                docs.append({
-                    'timestamp': now,
-                    'level': 'INFO',
-                    'source': batch.source or 'agent',
-                    'message': ln,
-                    'agent': batch.agent,
-                    'file': batch.source,
-                    'truncated': bool(batch.truncated)
+class LogAnalyzer:
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(max_features=100, stop_words='english')
+        self.error_keywords = [
+            'error', 'failed', 'failure', 'exception', 'critical', 
+            'fatal', 'crash', 'timeout', 'denied', 'unauthorized',
+            'corrupted', 'invalid', 'missing', 'not found'
+        ]
+        self.warning_keywords = [
+            'warning', 'caution', 'deprecated', 'slow', 'retry',
+            'timeout', 'degraded', 'unavailable'
+        ]
+    
+    def analyze_logs(self, logs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        
+        if not logs:
+            return {
+                "warnings": [],
+                "anomalies": [],
+                "summary": {
+                    "total": 0,
+                    "errors": 0,
+                    "warnings": 0,
+                    "info": 0
+                }
+            }
+        
+        warnings = []
+        anomalies = []
+        
+        
+        level_counts = Counter(log.get("level", "Unknown") for log in logs)
+        error_count = level_counts.get("Error", 0) + level_counts.get("Critical", 0)
+        warning_count = level_counts.get("Warning", 0)
+        info_count = level_counts.get("Information", 0)
+        
+        
+        total = len(logs)
+        error_rate = (error_count / total * 100) if total > 0 else 0
+        
+        if error_rate > 10:
+            warnings.append({
+                "type": "High Error Rate",
+                "message": f"Error rate is {error_rate:.1f}% ({error_count} errors out of {total} logs)",
+                "severity": "high"
+            })
+        
+        
+        error_logs = [log for log in logs if log.get("level") in ["Error", "Critical"]]
+        error_messages = [log.get("message", "") for log in error_logs]
+        
+        
+        error_patterns = self._find_error_patterns(error_messages)
+        for pattern, count in error_patterns.items():
+            if count > 5:
+                warnings.append({
+                    "type": "Repeated Error Pattern",
+                    "message": f"Error pattern '{pattern}' occurred {count} times",
+                    "severity": "medium"
                 })
-
-            if not docs:
-                raise HTTPException(status_code=400, detail='No lines to ingest')
-
-            result = await dbmod.db.logs.insert_many(docs)
-
-            # Retrieve inserted docs (optional) and broadcast
-            # We will broadcast each inserted doc to connected clients
-            inserted_ids = result.inserted_ids
-            for _id in inserted_ids:
-                doc = await dbmod.db.logs.find_one({'_id': _id})
-                if doc:
-                    doc['_id'] = str(doc['_id'])
-                    try:
-                        await manager.broadcast(doc)
-                    except Exception as e:
-                        logger.debug(f'Broadcast failed for batch doc: {e}')
-
-            logger.info(f"Batch ingested: {len(docs)} lines from {batch.agent or 'unknown'}")
-            return {"status": "ok", "inserted": len(docs)}
-
-        # Single entry payload: try to validate as LogEntry
-        entry = LogEntry(**payload)
-        data = entry.dict()
-        result = await dbmod.db.logs.insert_one(data)
-        doc = await dbmod.db.logs.find_one({"_id": result.inserted_id})
-        doc["_id"] = str(doc["_id"])
+        
+        
+        security_logs = [log for log in logs if "Security" in log.get("log_name", "") or 
+                        any(keyword in log.get("message", "").lower() for keyword in ["unauthorized", "denied", "failed login"])]
+        if len(security_logs) > 10:
+            warnings.append({
+                "type": "Security Alert",
+                "message": f"High number of security-related events: {len(security_logs)}",
+                "severity": "high"
+            })
+        
+        
+        if len(logs) > 20:
+            anomalies = self._detect_anomalies(logs)
+        
+        return {
+            "warnings": warnings,
+            "anomalies": anomalies[:5],  
+            "summary": {
+                "total": total,
+                "errors": error_count,
+                "warnings": warning_count,
+                "info": info_count
+            }
+        }
+    
+    def _find_error_patterns(self, messages: List[str]) -> Dict[str, int]:
+        
+        patterns = Counter()
+        
+        for message in messages:
+            
+            
+            service_match = re.search(r'([A-Z][a-z]+)\s+(?:service|process)', message, re.IGNORECASE)
+            if service_match:
+                patterns[f"Service Error: {service_match.group(1)}"] += 1
+            
+            
+            code_match = re.search(r'error\s+code\s+(\d+)', message, re.IGNORECASE)
+            if code_match:
+                patterns[f"Error Code: {code_match.group(1)}"] += 1
+        
+        return patterns
+    
+    def _detect_anomalies(self, logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        
         try:
-            await manager.broadcast(doc)
+            
+            messages = [log.get("message", "")[:200] for log in logs]  
+            
+            if not messages or all(not msg for msg in messages):
+                return []
+            
+            
+            try:
+                X = self.vectorizer.fit_transform(messages)
+            except:
+                return []
+            
+            
+            clustering = DBSCAN(eps=0.5, min_samples=3)
+            labels = clustering.fit_predict(X.toarray())
+            
+            
+            anomalies = []
+            for idx, label in enumerate(labels):
+                if label == -1:  
+                    log = logs[idx]
+                    anomalies.append({
+                        "timestamp": log.get("timestamp"),
+                        "level": log.get("level"),
+                        "message": log.get("message", "")[:100],  
+                        "log_name": log.get("log_name"),
+                        "reason": "Unusual log pattern detected"
+                    })
+            
+            return anomalies[:10]  
+            
         except Exception as e:
-            logger.warning(f"Failed to broadcast log: {e}")
+            print(f"Error in anomaly detection: {e}")
+            return []
 
-        logger.info(f"Log ingested: {data['level']} from {data['source']}")
-        return {"status": "ok", "id": str(result.inserted_id)}
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error ingesting log: {e}")
-        raise HTTPException(status_code=500, detail="Failed to ingest log entry")
-@router.get("/logs")
-async def list_logs(level: str = None, q: str = None, source: str = None, start: str = None, end: str = None, limit: int = 200, skip: int = 0, user: str = Depends(get_current_user)):
-    if dbmod.db is None:
-        raise HTTPException(status_code=503, detail="database not ready")
-    query = {}
-    if level:
-        query["level"] = level
-    if q:
-        query["message"] = {"$regex": q, "$options": "i"}
-    if source:
-        query["source"] = source
-    if start and end:
-        query["timestamp"] = {"$gte": start, "$lte": end}
-    cursor = dbmod.db.logs.find(query).sort("timestamp", -1).skip(skip).limit(limit)
-    items = []
-    async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        items.append(doc)
-    return items
-@router.get("/logs/stats")
-async def stats(level: str = None, q: str = None, source: str = None, start: str = None, end: str = None, granularity: str = None, user: str = Depends(get_current_user)):
-    if dbmod.db is None:
-        raise HTTPException(status_code=503, detail="database not ready")
-    match = {}
-    if level:
-        match["level"] = level
-    if q:
-        match["message"] = {"$regex": q, "$options": "i"}
-    if source:
-        match["source"] = source
-    pipeline = []
-    if match:
-        pipeline.append({"$match": match})
-    pipeline_lvl = pipeline + [{"$group": {"_id": "$level", "count": {"$sum": 1}}}]
-    pipeline_src = pipeline + [{"$group": {"_id": "$source", "count": {"$sum": 1}}}]
-    unit = "day"
-    if granularity in ("minute","hour","day","month"):
-        unit = granularity
-    pipeline_time = []
-    if start and end:
-        pipeline_time.append({"$match": {"timestamp": {"$gte": start, "$lte": end}}})
-    pipeline_time += [
-        {"$addFields": {"ts": {"$dateFromString": {"dateString": "$timestamp"}}}},
-        {"$group": {"_id": {"$dateTrunc": {"date": "$ts", "unit": unit}}, "count": {"$sum": 1}}},
-        {"$sort": {"_id": 1}}
-    ]
-    lvl_cursor = dbmod.db.logs.aggregate(pipeline_lvl)
-    src_cursor = dbmod.db.logs.aggregate(pipeline_src)
-    time_cursor = dbmod.db.logs.aggregate(pipeline_time)
-    levels = {}
-    async for d in lvl_cursor:
-        levels[d["_id"] or "UNKNOWN"] = d["count"]
-    sources = {}
-    async for d in src_cursor:
-        sources[d["_id"] or "UNKNOWN"] = d["count"]
-    times = []
-    async for d in time_cursor:
-        ts = d["_id"]
-        times.append({"t": ts.isoformat() if hasattr(ts, "isoformat") else str(ts), "count": d["count"]})
-    return {"levels": levels, "sources": sources, "times": times}
+
+analyzer = LogAnalyzer()

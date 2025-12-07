@@ -1,19 +1,61 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LogPuls</title>
-<link rel="stylesheet" href="/css/style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogPuls - Real-Time OS Log Analysis</title>
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-<div class="centercard">
-<h1>LogPuls</h1>
-<p class="lead">Real-Time OS Log Analysis</p>
-<div class="actions">
-<a class="btn" href="/login.html">Sign In</a>
-<a class="btn muted" href="/dashboard.html">Open Dashboard</a>
-</div>
-</div>
+    <div class="container">
+        <div class="login-card">
+            <div class="logo">
+                <h1>LogPuls</h1>
+                <p>Real-Time OS Log Analysis</p>
+            </div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required placeholder="Enter password">
+                </div>
+                <button type="submit" class="btn btn-primary">Login</button>
+                <div id="errorMessage" class="error-message"></div>
+            </form>
+        </div>
+    </div>
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('errorMessage');
+
+            try {
+                const response = await fetch('http://localhost:8000/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ password: password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    sessionStorage.setItem('authenticated', 'true');
+                    window.location.href = 'dashboard.html';
+                } else {
+                    errorDiv.textContent = data.detail || 'Invalid password';
+                    errorDiv.style.display = 'block';
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Connection error. Please check if the backend is running.';
+                errorDiv.style.display = 'block';
+            }
+        });
+
+        if (sessionStorage.getItem('authenticated') === 'true') {
+            window.location.href = 'dashboard.html';
+        }
+    </script>
 </body>
 </html>
