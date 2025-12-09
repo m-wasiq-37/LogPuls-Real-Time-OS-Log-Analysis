@@ -13,13 +13,10 @@ RUN pip install --upgrade pip && \
 
 COPY backend /app/backend
 COPY agent /app/agent
-
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+COPY startup.py /app/startup.py
 
 RUN mkdir -p /app/logs
 
-EXPOSE 8000 5000
+EXPOSE 8000
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

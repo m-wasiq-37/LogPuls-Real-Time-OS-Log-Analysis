@@ -16,19 +16,6 @@ services:
       timeout: 5s
       retries: 5
 
-  log-collector:
-    build: .
-    container_name: log-collector
-    command: python /app/agent/log_collector.py
-    environment:
-      - LOG_COLLECTOR_PORT=5000
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./agent:/app/agent
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - logpuls-network
 
   backend:
     build: .
@@ -39,20 +26,18 @@ services:
       - MONGODB_HOST=mongodb
       - MONGODB_PORT=27017
       - MONGODB_DATABASE=logpuls
-      - LOG_COLLECTOR_HOST=log-collector
-      - LOG_COLLECTOR_PORT=5000
-      - LOGIN_PASSWORD=${LOGIN_PASSWORD}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-admin123}
+      - WINDOWS_COLLECTOR_HOST=host.docker.internal
+      - WINDOWS_COLLECTOR_PORT=5001
     depends_on:
       mongodb:
         condition: service_healthy
-      log-collector:
-        condition: service_started
     volumes:
       - ./backend:/app/backend
       - ./agent:/app/agent
     networks:
       - logpuls-network
-    command: /app/docker-entrypoint.sh uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: sh -c "python startup.py && uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
       interval: 10s

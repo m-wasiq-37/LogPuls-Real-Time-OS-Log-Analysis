@@ -34,15 +34,12 @@ class ConnectionManager:
         for conn in disconnected:
             self.disconnect(conn)
 
-
 manager = ConnectionManager()
-
 
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            
             logs = db.get_logs(size=100)
             stats = db.get_log_statistics()
             analysis = analyzer.analyze_logs(logs)
@@ -55,7 +52,7 @@ async def websocket_endpoint(websocket: WebSocket):
             }
             
             await websocket.send_text(json.dumps(data))
-            await asyncio.sleep(5)  
+            await asyncio.sleep(5)
             
     except WebSocketDisconnect:
         manager.disconnect(websocket)

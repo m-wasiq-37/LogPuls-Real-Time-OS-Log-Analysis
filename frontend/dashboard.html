@@ -15,7 +15,7 @@
                 <h2>LogPuls</h2>
             </div>
             <div class="nav-actions">
-                <button class="btn btn-secondary" onclick="refreshLogs()">🔄 Refresh Logs</button>
+                <button class="btn btn-secondary" onclick="refreshLogs(event)">Refresh Logs</button>
                 <button class="btn btn-danger" onclick="logout()">Logout</button>
             </div>
         </div>
@@ -43,7 +43,7 @@
         </div>
 
         <div class="warnings-section" id="warningsSection" style="display: none;">
-            <h3>⚠️ System Warnings</h3>
+            <h3>System Warnings</h3>
             <div id="warningsContainer"></div>
         </div>
 
@@ -158,6 +158,7 @@
         let allLogs = [];
         let filteredLogs = [];
         let charts = {};
+        let currentFilters = {};
 
         if (sessionStorage.getItem('authenticated') !== 'true') {
             window.location.href = 'index.html';
@@ -171,12 +172,23 @@
                     labels: [],
                     datasets: [{
                         data: [],
-                        backgroundColor: ['#e74c3c', '#f39c12', '#3498db', '#2ecc71', '#9b59b6']
+                        backgroundColor: ['#e74c3c', '#f39c12', '#3498db', '#2ecc71', '#9b59b6', '#1abc9c']
                     }]
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: true
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                padding: 15,
+                                font: {
+                                    size: 12
+                                }
+                            }
+                        }
+                    }
                 }
             });
 
@@ -193,10 +205,18 @@
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
                     scales: {
                         y: {
-                            beginAtZero: true
+                            beginAtZero: true,
+                            ticks: {
+                                stepSize: 1
+                            }
                         }
                     }
                 }
@@ -212,15 +232,24 @@
                         data: [],
                         borderColor: '#3498db',
                         backgroundColor: 'rgba(52, 152, 219, 0.1)',
-                        tension: 0.4
+                        tension: 0.4,
+                        fill: true
                     }]
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
                     scales: {
                         y: {
-                            beginAtZero: true
+                            beginAtZero: true,
+                            ticks: {
+                                stepSize: 1
+                            }
                         }
                     }
                 }
@@ -229,7 +258,17 @@
 
         async function loadStats() {
             try {
-                const response = await fetch(`${API_BASE}/stats`);
+                const filters = getFilters();
+                const queryParams = new URLSearchParams();
+                
+                Object.keys(filters).forEach(key => {
+                    if (filters[key]) {
+                        queryParams.append(key, filters[key]);
+                    }
+                });
+
+                const url = queryParams.toString() ? `${API_BASE}/stats?${queryParams}` : `${API_BASE}/stats`;
+                const response = await fetch(url);
                 const data = await response.json();
 
                 if (data.success) {
@@ -241,30 +280,41 @@
                     document.getElementById('warningCount').textContent = byLevel.Warning || 0;
                     document.getElementById('infoCount').textContent = byLevel.Information || 0;
 
-                    updateCharts(stats);
+                    updateChartsFromStats(stats);
                 }
             } catch (error) {
                 console.error('Error loading stats:', error);
             }
         }
 
-        function updateCharts(stats) {
+        function updateChartsFromStats(stats) {
             const byLevel = stats.by_level || {};
             const byLogName = stats.by_log_name || {};
 
-            charts.level.data.labels = Object.keys(byLevel);
-            charts.level.data.datasets[0].data = Object.values(byLevel);
+            const levelLabels = Object.keys(byLevel);
+            const levelData = Object.values(byLevel);
+            
+            charts.level.data.labels = levelLabels;
+            charts.level.data.datasets[0].data = levelData;
             charts.level.update();
 
-            charts.type.data.labels = Object.keys(byLogName);
-            charts.type.data.datasets[0].data = Object.values(byLogName);
+            const logNameLabels = Object.keys(byLogName);
+            const logNameData = Object.values(byLogName);
+            
+            charts.type.data.labels = logNameLabels;
+            charts.type.data.datasets[0].data = logNameData;
             charts.type.update();
 
             updateTimeChart();
         }
 
         function updateTimeChart() {
-            if (allLogs.length === 0) return;
+            if (allLogs.length === 0) {
+                charts.time.data.labels = [];
+                charts.time.data.datasets[0].data = [];
+                charts.time.update();
+                return;
+            }
 
             const timeGroups = {};
             allLogs.forEach(log => {
@@ -275,8 +325,7 @@
                 }
             });
 
-            const labels = Object.keys(timeGroups).sort().slice(-24); 
-
+            const labels = Object.keys(timeGroups).sort().slice(-24);
             const data = labels.map(label => timeGroups[label] || 0);
 
             charts.time.data.labels = labels;
@@ -289,6 +338,7 @@
                 pageSize = parseInt(document.getElementById('tablePageSize').value);
 
                 const filters = getFilters();
+                currentFilters = filters;
                 const queryParams = new URLSearchParams();
 
                 Object.keys(filters).forEach(key => {
@@ -305,6 +355,8 @@
                     allLogs = data.logs || [];
                     filteredLogs = allLogs;
                     displayLogs();
+                    await loadStats();
+                    updateTimeChart();
                 }
             } catch (error) {
                 console.error('Error loading logs:', error);
@@ -413,7 +465,7 @@
             }
         }
 
-        async function refreshLogs() {
+        async function refreshLogs(event) {
             try {
                 const btn = event.target;
                 btn.disabled = true;
@@ -442,13 +494,12 @@
                         errorMsg = errorResponse.detail;
                     }
                 } catch (e) {
-
                 }
-                alert(errorMsg + '\n\nMake sure PowerShell helper server is running:\n.\\agent\\powershell_server.ps1');
+                alert(errorMsg);
             } finally {
                 const btn = event.target;
                 btn.disabled = false;
-                btn.textContent = '🔄 Refresh Logs';
+                btn.textContent = 'Refresh Logs';
             }
         }
 
@@ -499,4 +550,3 @@
     </script>
 </body>
 </html>
-
